@@ -80,10 +80,49 @@ c2_status_t C2FFMPEGVideoDecodeComponent::initDecoder() {
     mCtx->width = size.width;
     mCtx->height = size.height;
 
+    mCtx->workaround_bugs   = 1;
+    mCtx->idct_algo         = 0;
+    mCtx->skip_frame        = AVDISCARD_DEFAULT;
+    mCtx->skip_idct         = AVDISCARD_DEFAULT;
+    mCtx->skip_loop_filter  = AVDISCARD_DEFAULT;
+    mCtx->error_concealment = 3;
+    mCtx->thread_count      = base::GetIntProperty("debug.ffmpeg_codec2.threads", 0);
+
+    if (base::GetBoolProperty("debug.ffmpeg_codec2.fast", false)) {
+        mCtx->flags2 |= AV_CODEC_FLAG2_FAST;
+    }
+
     ALOGD("initDecoder: %p [%s], %d x %d, %s",
           mCtx, avcodec_get_name(mCtx->codec_id), size.width, size.height, mInfo->mediaType);
 
     return C2_OK;
+}
+
+void C2FFMPEGVideoDecodeComponent::findDecoders() {
+    void *iter = NULL;
+    const AVCodec *codec;
+
+    // Iterate through all compiled FFmpeg codecs dynamically
+    while ((codec = av_codec_iterate(&iter))) {
+        if (!av_codec_is_decoder(codec) || codec->id != mCodecID ||
+            !(codec->capabilities & AV_CODEC_CAP_HARDWARE))
+            continue;
+
+        mCtx->codec = codec;
+        ffmpeg_hwaccel_init(mCtx);
+
+        if (avcodec_open2(mCtx, mCtx->codec, NULL) == 0)
+            return;
+
+        onReset();
+    }
+
+    // Should be the software decoder
+    mCtx->codec = avcodec_find_decoder(mCodecID);
+    ffmpeg_hwaccel_init(mCtx);
+
+    if (avcodec_open2(mCtx, mCtx->codec, NULL) < 0)
+        onReset();
 }
 
 c2_status_t C2FFMPEGVideoDecodeComponent::openDecoder() {
@@ -98,42 +137,15 @@ c2_status_t C2FFMPEGVideoDecodeComponent::openDecoder() {
     mExtradataReady = true;
 
     // Find decoder again as codec_id may have changed.
-    if (mCtx->codec_id == AV_CODEC_ID_H264 &&
-            base::GetBoolProperty("persist.vendor.ffmpeg_codec2.v4l2.h264", false)) {
-        mCtx->codec = avcodec_find_decoder_by_name("h264_v4l2m2m");
-    } else {
-        mCtx->codec = avcodec_find_decoder(mCtx->codec_id);
-    }
-
+    findDecoders();
     if (! mCtx->codec) {
         ALOGE("openDecoder: ffmpeg video decoder failed to find codec %d", mCtx->codec_id);
         return C2_NOT_FOUND;
     }
-
-    // Configure decoder.
-    mCtx->workaround_bugs   = 1;
-    mCtx->idct_algo         = 0;
-    mCtx->skip_frame        = AVDISCARD_DEFAULT;
-    mCtx->skip_idct         = AVDISCARD_DEFAULT;
-    mCtx->skip_loop_filter  = AVDISCARD_DEFAULT;
-    mCtx->error_concealment = 3;
-    mCtx->thread_count      = base::GetIntProperty("debug.ffmpeg_codec2.threads", 0);
-
-    if (base::GetBoolProperty("debug.ffmpeg_codec2.fast", false)) {
-        mCtx->flags2 |= AV_CODEC_FLAG2_FAST;
-    }
-
-    ffmpeg_hwaccel_init(mCtx);
+    mCodecAlreadyOpened = true;
 
     ALOGD("openDecoder: opening ffmpeg decoder(%s): threads = %d, hw = %s",
           avcodec_get_name(mCtx->codec_id), mCtx->thread_count, mCtx->hw_device_ctx ? "yes" : "no");
-
-    int err = avcodec_open2(mCtx, mCtx->codec, NULL);
-    if (err < 0) {
-        ALOGE("openDecoder: ffmpeg video decoder failed to initialize. (%s)", av_err2str(err));
-        return C2_NO_INIT;
-    }
-    mCodecAlreadyOpened = true;
 
     ALOGD("openDecoder: open ffmpeg video decoder(%s) profile(%s) success, caps = %08x",
           avcodec_get_name(mCtx->codec_id),
@@ -216,6 +228,24 @@ c2_status_t C2FFMPEGVideoDecodeComponent::sendInputBuffer(
     mPacket->dts = AV_NOPTS_VALUE;
 
     int err = avcodec_send_packet(mCtx, mPacket);
+
+    if (err < 0 && err != AVERROR(EAGAIN) && err != AVERROR_EOF &&
+        mCtx->codec->capabilities & AV_CODEC_CAP_HARDWARE) {
+        onReset();
+
+        // Should be the software decoder
+        mCtx->codec = avcodec_find_decoder(mCodecID);
+        ffmpeg_hwaccel_init(mCtx);
+
+        if (avcodec_open2(mCtx, mCtx->codec, NULL) < 0) {
+            av_packet_unref(mPacket);
+            return C2_BAD_STATE; // SW initialization failed
+        }
+
+        // Resubmit the exact same packet to the new SW decoder seamlessly
+        err = avcodec_send_packet(mCtx, mPacket);
+    }
+
     av_packet_unref(mPacket);
 
     if (err < 0) {

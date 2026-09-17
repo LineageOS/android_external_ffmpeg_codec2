@@ -51,6 +51,7 @@ private:
     c2_status_t initDecoder();
     c2_status_t openDecoder();
     void deInitDecoder();
+    void findDecoders();
     c2_status_t processCodecConfig(C2ReadView* inBuffer);
     c2_status_t sendInputBuffer(C2ReadView* inBuffer, int64_t timestamp);
     c2_status_t receiveFrame(bool* hasPicture);
