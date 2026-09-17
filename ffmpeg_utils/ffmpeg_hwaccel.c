@@ -7,9 +7,6 @@
 #include "libavutil/opt.h"
 
 int ffmpeg_hwaccel_init(AVCodecContext *avctx) {
-    if (avctx->codec_id != AV_CODEC_ID_HEVC || !property_get_bool("persist.vendor.ffmpeg_codec2.v4l2.h265", 0))
-        return 0;
-
     // Find codec information. At this point, AVCodecContext.codec may not be
     // set yet, so retrieve our own version using AVCodecContext.codec_id.
     const AVCodec* codec = avcodec_find_decoder(avctx->codec_id);
