@@ -54,7 +54,7 @@ int main() {
     std::shared_ptr<IComponentStore> store = ndk::SharedRefBase::make<utils::ComponentStore>(
             std::make_shared<android::C2FFMPEGComponentStore>());
 
-    const std::string instance = std::string() + IComponentStore::descriptor + "/ffmpeg";
+    const std::string instance = std::string() + IComponentStore::descriptor + "/default";
     binder_status_t status = AServiceManager_addService(store->asBinder().get(), instance.c_str());
     CHECK(status == STATUS_OK);
 
