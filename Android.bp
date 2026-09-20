@@ -17,6 +17,7 @@ cc_binary {
         "main.cpp",
     ],
     shared_libs: [
+        "android.hardware.graphics.common@1.0",
         "android.hardware.media.c2-V1-ndk",
         "libavcodec",
         "libavservices_minijail",
