@@ -22,6 +22,11 @@
 #include <SimpleC2Interface.h>
 #include "C2FFMPEGVideoDecodeComponent.h"
 #include "ffmpeg_hwaccel.h"
+#include "libavutil/pixdesc.h"
+
+#include <android/hardware/graphics/common/1.0/types.h>
+
+using android::hardware::graphics::common::V1_0::BufferUsage;
 
 #define DEBUG_FRAMES 0
 #define DEBUG_WORKQUEUE 0
@@ -287,21 +292,31 @@ c2_status_t C2FFMPEGVideoDecodeComponent::getOutputBuffer(C2GraphicView* outBuff
     int linesize[4];
     C2PlanarLayout layout = outBuffer->layout();
     struct SwsContext* currentImgConvertCtx = mImgConvertCtx;
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get((AVPixelFormat)mFrame->format);
+    enum AVPixelFormat outpixfmt = AV_PIX_FMT_NV12;
+    if (!(mCtx->codec->capabilities & AV_CODEC_CAP_HARDWARE) ||
+        layout.planes[C2PlanarLayout::PLANE_U].colInc == 1)
+        outpixfmt = AV_PIX_FMT_YUV420P;
+    else if (desc && (desc->comp[0].depth == 10))
+        outpixfmt = AV_PIX_FMT_P010;
 
     data[0] = outBuffer->data()[C2PlanarLayout::PLANE_Y];
     data[1] = outBuffer->data()[C2PlanarLayout::PLANE_U];
-    data[2] = outBuffer->data()[C2PlanarLayout::PLANE_V];
     linesize[0] = layout.planes[C2PlanarLayout::PLANE_Y].rowInc;
     linesize[1] = layout.planes[C2PlanarLayout::PLANE_U].rowInc;
-    linesize[2] = layout.planes[C2PlanarLayout::PLANE_V].rowInc;
+
+    if (outpixfmt == AV_PIX_FMT_YUV420P) {
+        data[2] = outBuffer->data()[C2PlanarLayout::PLANE_V];
+        linesize[2] = layout.planes[C2PlanarLayout::PLANE_V].rowInc;
+    }
 
     mImgConvertCtx = sws_getCachedContext(currentImgConvertCtx,
            mFrame->width, mFrame->height, (AVPixelFormat)mFrame->format,
-           mFrame->width, mFrame->height, AV_PIX_FMT_YUV420P,
+           mFrame->width, mFrame->height, outpixfmt,
            SWS_BICUBIC, NULL, NULL, NULL);
     if (mImgConvertCtx && mImgConvertCtx != currentImgConvertCtx) {
         ALOGD("getOutputBuffer: created video converter - %s => %s",
-              av_get_pix_fmt_name((AVPixelFormat)mFrame->format), av_get_pix_fmt_name(AV_PIX_FMT_YUV420P));
+              av_get_pix_fmt_name((AVPixelFormat)mFrame->format), av_get_pix_fmt_name(outpixfmt));
 
     } else if (! mImgConvertCtx) {
         ALOGE("getOutputBuffer: cannot initialize the conversion context");
@@ -487,14 +502,26 @@ c2_status_t C2FFMPEGVideoDecodeComponent::outputFrame(
         }
     }
 
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get((AVPixelFormat)mFrame->format);
+    int32_t bufpixfmt = HAL_PIXEL_FORMAT_YCBCR_420_888;
+    uint64_t usage = static_cast<uint64_t>(C2MemoryUsage::CPU_READ) |
+                     static_cast<uint64_t>(BufferUsage::VIDEO_DECODER);
+    if (!(mCtx->codec->capabilities & AV_CODEC_CAP_HARDWARE)) {
+        bufpixfmt = HAL_PIXEL_FORMAT_YV12;
+        usage = static_cast<uint64_t>(C2MemoryUsage::CPU_READ) |
+                static_cast<uint64_t>(C2MemoryUsage::CPU_WRITE);
+    } else if (desc && (desc->comp[0].depth == 10)) {
+        bufpixfmt = HAL_PIXEL_FORMAT_YCBCR_P010;
+    }
+
+    const C2MemoryUsage memoryUsage(usage);
     std::shared_ptr<C2GraphicBlock> block;
 
-    err = pool->fetchGraphicBlock(mFrame->width, mFrame->height, HAL_PIXEL_FORMAT_YV12,
-                                  { C2MemoryUsage::CPU_READ, C2MemoryUsage::CPU_WRITE }, &block);
+    err = pool->fetchGraphicBlock(mFrame->width, mFrame->height, bufpixfmt, memoryUsage, &block);
 
     if (err != C2_OK) {
         ALOGE("outputFrame: failed to fetch graphic block %d x %d (%x) err = %d",
-              mFrame->width, mFrame->height, HAL_PIXEL_FORMAT_YV12, err);
+              mFrame->width, mFrame->height, bufpixfmt, err);
         return C2_CORRUPTED;
     }
 

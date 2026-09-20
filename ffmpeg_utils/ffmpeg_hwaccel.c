@@ -5,6 +5,7 @@
 
 #include "ffmpeg_hwaccel.h"
 #include "libavutil/opt.h"
+#include "libavutil/pixdesc.h"
 
 int ffmpeg_hwaccel_init(AVCodecContext *avctx) {
     // Find codec information. At this point, AVCodecContext.codec may not be
@@ -66,10 +67,12 @@ int ffmpeg_hwaccel_get_frame(AVCodecContext *avctx, AVFrame *frame) {
         return AVERROR(ENOMEM);
     }
 
-    output->format = AV_PIX_FMT_YUV420P;
-    if (avctx->profile == AV_PROFILE_HEVC_MAIN_10) {
-        output->format = AV_PIX_FMT_NV12;
-    }
+    const AVPixFmtDescriptor *desc = av_pix_fmt_desc_get(frame->format);
+    output->format = AV_PIX_FMT_NV12;
+    if (!(avctx->codec->capabilities & AV_CODEC_CAP_HARDWARE))
+        output->format = AV_PIX_FMT_YUV420P;
+    else if (desc && (desc->comp[0].depth == 10))
+        output->format = AV_PIX_FMT_P010;
 
     err = av_hwframe_transfer_data(output, frame, 0);
     if (err < 0) {
